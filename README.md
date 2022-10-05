@@ -1,1 +1,3 @@
 # Predicting-Rent-in-NYC
+
+The file contained here is the final report (R-Markdown) of a project I did for a class in the MS in Applied Analytics at Columbia University. It details my best attempts to predict rent in NYC for a private Kaggle Project hosted for the class. I used several different machine learning methods to do so: Linear Regression, LASSO, RIDGE, Random Forest, Gradient Boosting, and XG Boosting among others. My predictions on the public leaderboard landed me at 20/81 entries and 17/81 on the private leaderboard. Since it is only a report, the code in the file only pertains to the model (XG Boost) which gave me the best RMSE. If you would like to see my code for the other models, please contact me at timnyt@gmail.com. 
