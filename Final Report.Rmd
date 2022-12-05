@@ -1,0 +1,439 @@
+---
+title: "Kaggle Competition Report"
+author: "Timothy Ng"
+date: "5/1/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE,
+                      message = FALSE)
+```
+
+```{r libraries}
+#load libraries
+library(naniar)
+library(tidyverse)
+library(tidytext)
+library(qdap)
+library(rpart)
+library(randomForest)
+library(corrplot)
+library(tm)
+library(caret)
+library(gbm)
+library(vtreat)
+library(xgboost)
+library(plyr)
+```
+
+```{r data}
+#set working directory
+setwd("/Users/timothyng/Documents/Frameworks & Methods")
+
+#load in the data 
+airbnb = read_csv("analysisData.csv")
+
+airbnb_test = read_csv("scoringData.csv")
+
+```
+
+## Report Summary
+
+The goal of this Kaggle project was to predict AirBnB rental listing prices in NYC as accurately as possible. To that end, I employed various machine learning techniques such as Linear Regression, Random Forests, Gradient Boosting, and XGBoost. I found that XGBoost worked best for me and proved to be the easiest to use because of it's quick computing. My best submission was my 11th XGBoost model which resulted in my lowest `test` RMSE of 63.06 and 61.43 on the Kaggle public and private leader boards respectively.
+
+Through XGBoost, the ten most important features in the model were: 
+
+1. `room_type` - the type of room involved in the rental (e.g., private room, shared room)
+2. `bathrooms` - the total number of bathrooms for the listing
+3. `cleaning_fee` - the cost of the cleaning fee for the listing
+4. `accommodates` - the total number of people that the listing can accommodate
+5. `neighbourhood_group_cleaned` -  which borough the listing is located in
+6. `bedrooms` - the total number of bedrooms for the listing
+7. `availability_30` - the availability of the listing out of the next 30 days
+8. `host_total_listings_count` - the total number of listings for that host
+9. `minimum_nights` - minimum length of stay involved for the rental
+10. `extra_people` - the price per additional guest of the listing
+
+
+
+In this report, I try to outline how I went about the project; demonstrating my thought process though the steps of data exploration, data cleaning, and model fitting before coming to discuss potential avenues for future improvement.
+
+## Data Exploration
+
+### Dependent Variable
+The variable that we were predicting was `price`. Therefore, a good starting point was to check that our dependent variable was not missing any values.
+
+```{r price}
+#check price column for missing values
+
+which(is.na(airbnb$price)) #there are no missing values in price
+
+#let's check for values of 0
+sum(airbnb$price == 0) #there are 7 rows where price contains the value 0
+
+#drop values where price is 0
+airbnb = airbnb[airbnb$price != 0, ]
+
+```
+As the code suggests, there were no missing values but there were some values of price which were 0 that I then removed from the data. 
+
+### Predictor Variables
+
+There were 91 predictor variables in the dataset. Many of them, however, did not seem all too relevant in predicting price. To start, I removed the variables with little to no variance since they would not play an important factor in my predictions. 
+
+```{r variance}
+#get names of columns with zero or near zero variance
+nzv_cols <- nearZeroVar(airbnb)
+if(length(nzv_cols) > 0) airbnb <- airbnb[, -nzv_cols]
+```
+
+Next, I checked where the missing data was in the dataset.
+
+```{r}
+miss_var_summary(airbnb) #much of the data is missing
+```
+Going through the list of columns, it seemed safe to delete those that have more than 35% of their data missing since those variables either seemed irrelevant or were missing too much data to impute with precision. 
+
+```{r missing1}
+airbnb <- airbnb[colSums(is.na(airbnb))/nrow(airbnb) < .35]
+```
+
+
+Many of the remaining predictors seemed to encode redundant features. For example, it was not entirely clear to me what the difference between `minimum_nights` and `minimum_minimum_nights` was. For the sake of simplicity, I dropped these and other columns which I thought were redundant. 
+
+```{r nights}
+#dropping variables which are redundant for nights
+airbnb = subset(airbnb, select = -c(minimum_minimum_nights,maximum_maximum_nights,maximum_minimum_nights,minimum_maximum_nights,minimum_nights_avg_ntm,maximum_nights_avg_ntm))
+```
+
+
+```{r location}
+#dropping variables which are redundant for location
+airbnb <- subset(airbnb,select = -c(is_location_exact,smart_location,city,neighbourhood,neighbourhood_cleansed,street,zipcode))
+
+```
+
+Some facts about the host also do not intuitively play any role in predicting price. Whether the name of our host is John or Sally, for instance, has no relation to how much the price of a listing will be. Even if it did, it was not clear to me how to go about categorising such columns to produce meaningful differences anyway. These columns were therefore dropped. 
+
+```{r host}
+#many variables about the host are also seemingly irrelevant or redundant
+airbnb <- subset(airbnb,select = -c(host_location,host_neighbourhood,host_verifications,host_identity_verified,host_since,host_name,host_listings_count,calculated_host_listings_count_entire_homes,calculated_host_listings_count_private_rooms))
+
+```
+
+Many of the columns left also require NLP to use. I dropped these with the exception of the `description` column for which I planned on using later. 
+
+```{r NLP}
+airbnb = subset(airbnb, select = -c(name,summary,space,neighborhood_overview,transit))
+```
+
+Exploring the remaining columns, I found that many of them had too many factors or were difficult to use. The `property type` column, for example, contained many different factors, many of which were synonymous with large categories such as House or Apartment and would be better served being in those categories. I then either recategorised some of them to contain fewer factors or dropped columns I found hard to make meaningful such as the `amenities` column.
+
+```{r property_type train}
+#the property type category contains too many factors, let us try to categorize them.
+airbnb$property_type = revalue(airbnb$property_type,  c("Condominium"="Apartment", "Townhouse"="House","Serviced apartment"="Apartment","Guesthouse"="House","Loft"="Apartment","Guest suite"="Apartment","Boutique hotel"="Hotel", "Bungalow" ="House","Villa" ="House","Cottage"="House","Aparthotel" = "Hotel"))
+
+#place remaining factors into "other" category 
+
+#define not in function
+`%notin%` <- Negate(`%in%`)
+airbnb$property_type[airbnb$property_type %notin% c("House","Apartment","Hotel")] <- "Other" 
+
+
+```
+
+
+```{r propert_type test}
+#the property type category contains too many factors, let us try to categorize them.
+airbnb_test$property_type = revalue(airbnb_test$property_type,  c("Condominium"="Apartment", "Townhouse"="House","Serviced apartment"="Apartment","Guesthouse"="House","Loft"="Apartment","Guest suite"="Apartment","Boutique hotel"="Hotel", "Bungalow" ="House","Villa" ="House","Cottage"="House","Aparthotel" = "Hotel"))
+
+#place remaining factors into "other" category 
+
+#define not in function
+`%notin%` <- Negate(`%in%`)
+airbnb_test$property_type[airbnb_test$property_type %notin% c("House","Apartment","Hotel")] <- "Other"
+
+```
+
+```{r room_type}
+#the room type variable also has one extra factor in the training set which we should recategorize 
+airbnb$room_type = revalue(airbnb$room_type, c("Hotel room" = "Private room"))
+```
+
+```{r host_response}
+#define function for percentage to number
+pct_to_number<- function(x){
+  x_replace_pct<-sub("%", "", x)
+  x_as_numeric<-as.numeric(x_replace_pct)
+  }
+airbnb[['host_response_rate']] = pct_to_number(airbnb[['host_response_rate']])
+
+#replace na values with 0
+airbnb = airbnb %>% mutate_at(4, ~replace_na(.,0))   
+
+#transform into categorical: host response rate
+airbnb$host_response_rate = cut(airbnb$host_response_rate,breaks = c(-Inf,50,90,99,Inf),
+                                labels = c("0-49%", "50-89%", "90-99%", "100%"),
+                                include_lowest = TRUE)
+
+#fill na with "unknown"
+airbnb$host_response_time[is.na(airbnb$host_response_time)] <- "unknown"
+airbnb$host_response_time = revalue(airbnb$host_response_time,  c("N/A"  = "unknown"))
+```
+
+```{r host_response test}
+airbnb_test[['host_response_rate']] = pct_to_number(airbnb_test[['host_response_rate']])
+
+#replace na values with 0
+airbnb_test = airbnb_test %>% mutate_at(17, ~replace_na(.,0))   
+
+#transform into categorical: host response rate
+airbnb_test$host_response_rate = cut(airbnb_test$host_response_rate,breaks = c(-Inf,50,90,99,Inf),
+                                labels = c("0-49%", "50-89%", "90-99%", "100%"),
+                                include_lowest = TRUE)
+
+#fill na with "unknown"
+airbnb_test$host_response_time[is.na(airbnb_test$host_response_time)] <- "unknown"
+airbnb_test$host_response_time = revalue(airbnb_test$host_response_time,  c("N/A"  = "unknown"))
+
+```
+```{r cancellation_policy}
+#transform cancellation policy by replacing super_strict_30 and 60 with just super strict_14
+airbnb$cancellation_policy = revalue(airbnb$cancellation_policy, c("super_strict_30"="strict_14_with_grace_period","super_strict_60"="strict_14_with_grace_period","strict"= "strict_14_with_grace_period"))
+
+#drop amenities column
+airbnb$amenities = NULL
+
+```
+
+```{r cancellation_policy test}
+#transform cancellation policy by replacing super_strict_30 and 60 with just super strict_14
+airbnb_test$cancellation_policy = revalue(airbnb_test$cancellation_policy, c("super_strict_30"="strict_14_with_grace_period","super_strict_60"="strict_14_with_grace_period","strict"= "strict_14_with_grace_period"))
+
+#drop amenities column
+airbnb_test$amenities = NULL
+
+```
+
+
+## Data Cleaning and Imputation
+
+After exploring the data and eliminating variables that did not make sense to include or were redundant I then moved to clean the data.
+
+I began by first imputing values for the columns which contained many points of missing data
+
+```{r impute}
+#impute na values with 0 for security fee and cleaning deposit
+airbnb$security_deposit[is.na(airbnb$security_deposit)] = 0 
+
+airbnb$cleaning_fee[is.na(airbnb$cleaning_fee)] = 0 
+```
+
+```{r impute test}
+#impute na values with 0 for security fee and cleaning deposit
+airbnb_test$security_deposit[is.na(airbnb_test$security_deposit)] = 0 
+
+airbnb_test$cleaning_fee[is.na(airbnb_test$cleaning_fee)] = 0 
+
+```
+
+
+I then dropped the remaining rows of data which contained missing values as all these columns had fewer than 50 rows of missing data with the exception of the description feature which there was no good way to impute. 
+
+```{r missing}
+airbnb = airbnb %>% filter(complete.cases(.[,-2]))
+```
+
+
+### Basic NLP
+
+Apart from the original 91 variables in the `train` dataset, I felt that the `description` variable could be interesting to use. In particular, words that were used repeatedly to emphasise things about the size of a listing could affect rental prices. For example, the word "cozy" is a euphemism for a small place. Hence, I created 3 extra predictors that searched for words such as "cozy", and other related words pertaining to size such as "spacious" and "private".
+
+```{r cozy}
+# Adding "cozy", "spacious" and "private" as predictors
+cozy_rows <- grep(pattern="cozy", x=tolower(airbnb$description))
+airbnb$cozy <- F
+airbnb$cozy[cozy_rows] <- T
+```
+
+```{r cozy test}
+# Adding "cozy", "spacious" and "private" as predictors
+cozy_rows <- grep(pattern="cozy", x=tolower(airbnb_test$description))
+airbnb_test$cozy <- F
+airbnb_test$cozy[cozy_rows] <- T
+```
+
+```{r spacious, echo=FALSE}
+# Adding another variable, "spacious"
+spacious_rows <- grep(pattern="spacious", x=tolower(airbnb$description))
+airbnb$spacious <- F
+airbnb$spacious[spacious_rows] <- T
+```
+
+```{r spacious test, echo=FALSE}
+# Adding another variable, "spacious"
+spacious_rows <- grep(pattern="spacious", x=tolower(airbnb_test$description))
+airbnb_test$spacious <- F
+airbnb_test$spacious[spacious_rows] <- T
+```
+
+```{r private, echo=FALSE}
+# Adding another variable, "private"
+private_rows <- grep(pattern="private", x=tolower(airbnb$description))
+airbnb$private <- F
+airbnb$private[private_rows] <- T
+
+airbnb$description = NULL
+```
+
+
+```{r private test, echo=FALSE}
+# Adding another variable, "private"
+private_rows <- grep(pattern="private", x=tolower(airbnb_test$description))
+airbnb_test$private <- F
+airbnb_test$private[private_rows] <- T
+
+airbnb_test$description = NULL
+```
+### LASSO Feature Selection
+
+My next step was to reduce the number of variables included even further via LASSO as there were still 43 variables left in my data.
+
+```{r LASSO}
+
+airbnb = airbnb %>%
+    mutate_if(is.numeric, scale)
+
+x = model.matrix(price~.-1,data=airbnb)
+y = airbnb$price
+
+library(glmnet)
+set.seed(212)
+cv_lasso = cv.glmnet(x = x, 
+                     y = y, 
+                     alpha = 1,
+                     type.measure = 'mse')
+
+```
+
+```{r coef}
+coef(cv_lasso, s = cv_lasso$lambda.1se)
+```
+
+After going through the list of variables that were still included following the LASSO subset selection, I noticed that many variables I had thought were important were still being reduced to 0. After doing some research on some of the variables, I opted to retain a few of them even though the LASSO deemed them to be unimportant. 
+
+
+My final train data contained the following variables:
+
+```{r train_final}
+train_final <- airbnb %>%
+  select(price, room_type, accommodates, cleaning_fee, host_total_listings_count,
+         availability_30, extra_people, number_of_reviews, bathrooms,
+         bedrooms, security_deposit, neighbourhood_group_cleansed,
+         minimum_nights,maximum_nights, cozy, cancellation_policy,
+         property_type, spacious, private, review_scores_location)
+
+```
+
+```{r test_final}
+test_final <- airbnb_test %>%
+  select(room_type, accommodates, cleaning_fee, host_total_listings_count,
+         availability_30, extra_people, number_of_reviews, bathrooms,
+         bedrooms, security_deposit, neighbourhood_group_cleansed,
+         minimum_nights,maximum_nights, cozy, cancellation_policy,
+         property_type, spacious, private, review_scores_location)
+
+```
+
+
+## Model Fitting
+
+### Linear regression
+
+I began the project with linear regression to see just how far running a simple algorithm could take me. This was done in part to asses the quality of the variables that I had selected. My reasoning was that the best Linear Model I could come up with would also contain, more or less, the best features for predictions and those would be the variables I would pass to my more advance models. I found, however, that the Linear Models did a lot of work "under the hood" and implementing the same variables I used for the Linear Models required a lot more work for the other algorithms. The results were as follows:
+
+Linear Model | Test RMSE (Private) | Test RMSE (Public)
+------------ | ------------ | -----------------------
+1 | 132.74 | 137.55
+2 | 103.76 | 107.35
+3 | 86.71 | 87.44
+4 (best) | 73.06 | 74.21
+
+In Model 1, I started with virtually all the predictors that I felt might even be slightly important and reduced the number of predictors incrementally until I reached Model 4 with the lowest `train` RMSE. Eventually, I ended up with 28 predictors in Model 4, which yielded the best `test` RMSE for the linear model. I continued to experiment with Linear Models thereafter, using different predictors each time along with the predictors I had come to find were useful. This came with diminishing returns, however, and I eventually moved on to different models.
+
+
+### Random forests
+
+For the Random Forest model I used the 20 predictors that I had found after being more thorough with my data exploration and the `test` RMSE was much better than any of my Linear models. I ran 2 Random Forest models: Model 1 ran with default settings and Model 2 tuned with `mtry = 5`. The results showed that the untuned model performed better on the `test` set. 
+
+Random Forest Model | Test RMSE (Private) | Test RMSE (Public)
+------------ | ------------ | -----------
+1 (best) | 63.69 | 63.29
+2 | 65.99 | 64.78
+
+### Gradient Boosting
+
+
+Gradient Boosting Model | Test RMSE (Private) | Test RMSE (Public)
+------------ | ------------ | -----------
+1 (best) | 69.68 | 70.43
+
+Turning to Gradient Boosting, I used the same set of 20 predictors as I did with the random forest. My results however, fared much worse than that of the Random Forest and I decided to move away from it. 
+
+### XGBoost (best model)
+
+The final modelling method that I used for the project was XGBoost, the reason being that gave me the best `test` RMSE on the public leader board. For that reason, I focused  heavily on XGBoost and tried to optimise my RSME in various ways. In total, I had 13 different XGBooost models. All XGBoost models were tuned with `nfold = 5` to find the optimal `nrounds`. I experimented with shifting in and out different combinations of features as well as trying to engineer some features to see if they could increase the accuracy of my predictions. My best model in the end contained all 20 features I had in the final training set. 
+
+XGBoost Model | nrounds| Test RMSE (Private) | Test RMSE (Public)
+---------- | -------  | ----------- | ---------- | ---------
+1 | 39 | 62.71 | 62.08
+2 | 42 | 64.43 | 62.56
+3 | 41 | 62.83 | 61.69
+4 (best) | 36 | 63.06 | 61.43
+
+One thing that I did notice was that some of the features I had selected, even after the LASSO subset selection, proved to not really do much for my predictions. I added additional variables to my original set of 20 such as more review score features and different facts about the hosts but these did not really affect my RMSE at all.  
+
+Below are the top 15 features selected by my best performing XGBoost model. It is interesting to note that the XGBoost model deemed internal attributes such as `room_type`, `bathrooms` and `cleaning_fee`  as more important over locational features such as  `neighbourhood_group_cleansed`. It is often said that location is the first rule of real-estate and that a listing's location is a big determiner in it's price. But it would seem that in this case other features were deemed more important by the model.
+
+```{r xgboost, echo=FALSE, results=FALSE}
+trt <- designTreatmentsZ(dframe=train_final,
+                         varlist=names(train_final)[2:21])
+newvars <- trt$scoreFrame[trt$scoreFrame$code%in% c("clean", "lev"), "varName"]
+
+train_input <- prepare(treatmentplan=trt,
+                       dframe=train_final,
+                       varRestriction=newvars)
+test_input <- prepare(treatmentplan=trt,
+                      dframe=test_final,
+                      varRestriction=newvars)
+mod13 <- xgboost(data=as.matrix(train_input),
+                 label=train_final$price,
+                 nrounds=36,
+                 verbose=0)
+xgb.plot.importance(xgb.importance(model = mod13), top_n = 15)
+```
+
+## Summary
+
+In summary, the XGBoost model with the 20 predictors performed the best with a `test` RMSE of 63.06 (private leaderboard) and 61.43 (public leaderboard). Linear regression did not fair as well and neither did Random Forest. This could be due to the fact that this prediction problem was not linear in nature and that I did not run the Random Forest on the optimal number of trees or that I didn't use the algorithm properly. 
+
+### Future work & Improvement
+
+Many of the predictors used in my best model had a right-skew in the distribution. This means that outliers may have  affected the model's performance. As a result, it may have been worthwhile to have performed some sort of transformation (e.g., log transformation) to the skewed data to ensure a close enough normal distribution.
+
+In the future, I would also definitely spend more time closely looking at each variable in the data set. In an effort to jump to the model fitting aspect of the project, which I thought would take the most time, I simply disregarded many variables that could have been useful in predicting prices. 
+
+Finally, it would have been interesting to use the amenities column as a predictor for price. After all, it would seem intuitive that listings with certain amenities such as WiFi or a terrace would have a considerable impact on that listing's price. 
+
+
+
+
+
+
+
+
+
+
+
+
