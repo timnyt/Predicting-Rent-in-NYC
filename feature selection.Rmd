@@ -1,0 +1,170 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(caret)
+library(plyr)
+library(tidyverse)
+
+#load in data 
+setwd("/Users/timothyng/Documents/Frameworks & Methods")
+
+#feature selection 
+airbnb = read_csv("analysisData.csv")
+
+
+```
+
+
+```{r}
+#let us remove the id variable first
+airbnb$id <- NULL
+
+#let's delete the variables where more than thirty percent of the data is missing
+airbnb <- airbnb[colSums(is.na(airbnb))/nrow(airbnb) < .35]
+
+#let's see which variables have zero variance and delete those too
+nzv_cols <- nearZeroVar(airbnb)
+if(length(nzv_cols) > 0) airbnb <- airbnb[, -nzv_cols]
+```
+
+
+```{r}
+#the property type category contains too many factors, let us try to categorize them.
+airbnb$property_type = revalue(airbnb$property_type,  c("Condominium"="Apartment", "Townhouse"="House","Serviced apartment"="Apartment","Guesthouse"="House","Loft"="Apartment","Guest suite"="Apartment","Boutique hotel"="Hotel", "Bungalow" ="House","Villa" ="House","Cottage"="House","Aparthotel" = "Hotel"))
+
+#place remaining factors into "other" category 
+#define not in function
+`%notin%` <- Negate(`%in%`)
+airbnb$property_type[airbnb$property_type %notin% c("House","Apartment","Hotel")] <- "Other" 
+```
+
+```{r}
+#many of these variables also require NLP to use properly, we shall omit these for now
+airbnb <- airbnb[ -c(1:7) ]
+
+#many variables about the host are also seemingly irrelevant
+airbnb <- subset(airbnb,select = -c(host_location,host_neighbourhood,host_verifications,host_identity_verified,host_since,first_review,last_review,beds))
+
+
+#many location variables are also redundant, let's delete those
+airbnb <- subset(airbnb,select = -c(is_location_exact,smart_location,city,neighbourhood,neighbourhood_cleansed,street,zipcode))
+```
+
+```{r}
+airbnb$host_is_superhost = gsub(FALSE,"f",airbnb$host_is_superhost)
+airbnb$host_is_superhost = gsub(TRUE,"t",airbnb$host_is_superhost)
+
+
+
+pct_to_number<- function(x){
+  x_replace_pct<-sub("%", "", x)
+  x_as_numeric<-as.numeric(x_replace_pct)
+  }
+airbnb[['host_response_rate']] = pct_to_number(airbnb[['host_response_rate']])
+
+airbnb = airbnb %>% mutate_at(2, ~replace_na(.,0))   
+
+airbnb2 = airbnb
+
+#transform into categorical: host response rate
+airbnb2$host_response_rate = cut(airbnb2$host_response_rate,breaks = c(-Inf,50,90,99,Inf),
+                                labels = c("0-49%", "50-89%", "90-99%", "100%"),
+                                include_lowest = TRUE)
+
+#fill na with "unknown"
+airbnb2$host_response_time[is.na(airbnb2$host_response_time)] <- "unknown"
+airbnb2$host_response_time = revalue(airbnb$host_response_time,  c("N/A"  = "unknown"))                                
+airbnb2$calendar_updated = NULL
+
+#transform cancellation policy
+airbnb2$cancellation_policy = revalue(airbnb2$cancellation_policy, c("super_strict_30"="strict_14_with_grace_period","super_strict_60"="strict_14_with_grace_period","strict"= "strict_14_with_grace_period"))
+
+```
+
+
+```{r}
+
+airbnb2$amenities = NULL
+
+airbnb3 = airbnb2
+
+
+airbnb3 = airbnb3 %>% mutate_at(14, ~replace_na(.,0))
+airbnb3 = airbnb3 %>% mutate_at(15, ~replace_na(.,0))
+
+
+airbnb3 = na.omit(airbnb3)
+
+#use lasso
+
+airbnb3 = airbnb3 %>%
+    mutate_if(is.numeric, scale)
+
+x = model.matrix(price~.-1,data=airbnb3)
+y = airbnb3$price
+
+
+
+library(glmnet)
+set.seed(312)
+cv_lasso = cv.glmnet(x = x, 
+                     y = y, 
+                     alpha = 0.5,
+                     type.measure = 'mse')
+```
+
+```{r}
+tmp_coef = coef(cv_lasso, s = cv_lasso$lambda.1se)
+
+tmp_coef
+
+
+x2 <- as.data.frame(x[, tmp_coef@i[-1]])
+
+
+
+```
+
+
+```{r}
+#run xgboost with lasso variables
+
+colnames(x2)
+
+predictvars <- c("neighbourhood_group_cleansed_Manhattan","neighbourhood_group_cleansed_Queens" ,"neighbourhood_group_cleansed_Staten Island", "property_typeHotel"                         
+,"room_typePrivate room"             ,          "room_typeShared room"                       
+, "accommodates"                     ,           "bathrooms"                                  
+,"bedrooms"                          ,          "security_deposit"                           
+, "cleaning_fee"                     ,           "guests_included"                            
+, "minimum_minimum_nights"           ,           "availability_30"                            
+, "number_of_reviews_ltm"            ,           "review_scores_location"                     
+, "calculated_host_listings_count_entire_homes")
+
+predictvars2 = colnames(x2)
+
+
+airbnbone_2 = airbnb2[names(airbnb2)%in%predictvars]
+
+```
+
+
+
+```{r}
+#dummify variables
+airbnbone_21 = dummy_cols(airbnb2,
+               remove_first_dummy = FALSE)
+
+
+airbnbone_22 = airbnbone_21[names(airbnbone_21)%in%predictvars]
+
+write.csv(airbnb2,"lmaodata.csv",row.names = FALSE)
+
+```
+
